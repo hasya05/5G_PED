@@ -573,61 +573,48 @@ with chart_right:
 
 # ----------------------------- Mobility map ---------------------------------
 st.subheader("Mobility track")
+
 lat_col = available_col(visible, "latitude")
 lon_col = available_col(visible, "longitude")
+
 if lat_col and lon_col:
     map_df = visible.copy()
     map_df[lat_col] = numeric_series(map_df[lat_col])
     map_df[lon_col] = numeric_series(map_df[lon_col])
+
     map_df = map_df.dropna(subset=[lat_col, lon_col])
     map_df = map_df[
-        map_df[lat_col].between(-90, 90) & map_df[lon_col].between(-180, 180)
+        map_df[lat_col].between(-90, 90)
+        & map_df[lon_col].between(-180, 180)
     ]
+
     if not map_df.empty:
-        color_col = rsrp_col if rsrp_col else None
-fig = px.scatter_map(
-    map_df,
-    lat="Latitude",
-    lon="Longitude",
-    color="RSRP",
-    hover_data=["CellId", "NetworkMode"],
-    zoom=12,
-    height=500,
-)
-st.plotly_chart(fig, use_container_width=True)
-        fig.update_layout(margin=dict(l=0, r=0, t=45, b=0))
+        color_col = rsrp_col if rsrp_col and rsrp_col in map_df.columns else None
+
+        hover_cols = [
+            col for col in [cell_col, network_mode_col]
+            if col and col in map_df.columns
+        ]
+
+        fig = px.scatter_map(
+            map_df,
+            lat=lat_col,
+            lon=lon_col,
+            color=color_col,
+            hover_data=hover_cols,
+            zoom=12,
+            height=500,
+        )
+
+        fig.update_layout(
+            margin=dict(l=0, r=0, t=45, b=0)
+        )
         st.plotly_chart(fig, use_container_width=True)
+
     else:
-        st.info("Latitude/longitude columns were found, but no valid coordinates are available.")
+        st.info(
+            "Latitude/longitude columns were found, "
+            "but no valid coordinates are available."
+        )
 else:
     st.info("GPS columns not found; mobility map is unavailable.")
-
-# ----------------------------- Data table & export --------------------------
-st.subheader("Filtered measurements")
-with st.expander("View data", expanded=False):
-    st.dataframe(visible, use_container_width=True, height=350)
-
-csv_bytes = visible.to_csv(index=False).encode("utf-8")
-st.download_button(
-    "⬇️ Download filtered measurements (CSV)",
-    data=csv_bytes,
-    file_name="5g_monitoring_filtered.csv",
-    mime="text/csv",
-)
-
-# Show detected mappings for debugging and reproducibility.
-with st.expander("Detected source-column mapping"):
-    mapping_rows = [
-        {
-            "Dashboard field": DISPLAY_NAMES.get(key, key),
-            "Detected source column": value if value is not None else "Not found",
-        }
-        for key, value in column_mapping.items()
-    ]
-    st.dataframe(pd.DataFrame(mapping_rows), use_container_width=True, hide_index=True)
-
-st.caption(
-    "Note: A stronger neighboring measurement can be a handover candidate indicator, but "
-    "actual handover decisions depend on target-cell identity, radio conditions, mobility, "
-    "network configuration, hysteresis, time-to-trigger and network-side signaling."
-)
