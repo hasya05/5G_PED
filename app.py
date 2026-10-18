@@ -1,8 +1,40 @@
+# ---------------------------------------------------------
+# DATASET INITIALIZATION — FIX FOR NameError: raw_df
+# ---------------------------------------------------------
+
+# Keep your existing dataset loader above this section.
+# If your app already defines raw_df, do not load it again.
+
+if "raw_df" not in locals():
+    if "df" in locals() and isinstance(df, pd.DataFrame):
+        raw_df = df
+    else:
+        uploaded_file = st.file_uploader(
+            "Upload your dataset",
+            type=["csv"],
+            key="single_cell_dataset_upload",
+        )
+
+        if uploaded_file is None:
+            st.info("Please upload your dataset to continue.")
+            st.stop()
+
+        raw_df = pd.read_csv(uploaded_file)
+
+if raw_df is None or raw_df.empty:
+    st.error("The dataset is empty or could not be loaded.")
+    st.stop()
+
+columns = list(raw_df.columns)
+
+if not columns:
+    st.error("No columns were found in the dataset.")
+    st.stop()
+
 
 # ---------------------------------------------------------
 # AUTOMATIC SINGLE-CELL MONITORING MODE
-# Insert after: columns = list(raw_df.columns)
-# and the empty-columns check, before COLUMN MAPPING.
+# Your original monitoring code starts here.
 # ---------------------------------------------------------
 
 column_lookup = {str(c).strip().lower(): c for c in raw_df.columns}
@@ -176,10 +208,7 @@ if single_rsrp_col is not None and target_rsrp_col is None:
 
     k1, k2, k3, k4 = st.columns(4)
 
-    k1.metric(
-        "Observations",
-        f"{len(filtered_monitor):,}",
-    )
+    k1.metric("Observations", f"{len(filtered_monitor):,}")
     k2.metric(
         "Average RSRP",
         f"{filtered_monitor['Monitor_RSRP'].mean():.1f} dBm",
