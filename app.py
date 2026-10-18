@@ -571,6 +571,7 @@ with chart_right:
     else:
         st.info("Serving RSRP and neighbor RSRP are both required for this comparison.")
 
+
 # ----------------------------- Mobility map ---------------------------------
 st.subheader("Mobility track")
 
@@ -589,12 +590,16 @@ if lat_col and lon_col:
     ]
 
     if not map_df.empty:
-        color_col = rsrp_col if rsrp_col and rsrp_col in map_df.columns else None
+        color_col = (
+            rsrp_col
+            if rsrp_col and rsrp_col in map_df.columns
+            else None
+        )
 
-       hover_cols = [
-    col for col in ["CellId", "NetworkMode"]
-    if col in map_df.columns
-    ]
+        hover_cols = [
+            col for col in ["CellId", "NetworkMode"]
+            if col in map_df.columns
+        ]
 
         fig = px.scatter_map(
             map_df,
