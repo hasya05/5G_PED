@@ -585,19 +585,16 @@ if lat_col and lon_col:
     ]
     if not map_df.empty:
         color_col = rsrp_col if rsrp_col else None
-        fig = px.scatter_mapbox(
-            map_df,
-            lat=lat_col,
-            lon=lon_col,
-            color=color_col,
-            hover_name="Source_Trace",
-            hover_data=[c for c in [time_col, cell_col, rsrp_col, sinr_col] if c and c in map_df.columns],
-            zoom=13,
-            height=450,
-            mapbox_style="open-street-map",
-            title="Recorded GPS points",
-            labels={rsrp_col: "RSRP (dBm)"} if rsrp_col else None,
-        )
+fig = px.scatter_map(
+    map_df,
+    lat="Latitude",
+    lon="Longitude",
+    color="RSRP",
+    hover_data=["CellId", "NetworkMode"],
+    zoom=12,
+    height=500,
+)
+st.plotly_chart(fig, use_container_width=True)
         fig.update_layout(margin=dict(l=0, r=0, t=45, b=0))
         st.plotly_chart(fig, use_container_width=True)
     else:
