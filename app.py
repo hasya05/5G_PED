@@ -1,204 +1,850 @@
-import io, zipfile
+
+import io
+import zipfile
+from datetime import datetime
+
 import numpy as np
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
-st.set_page_config(page_title="5G PED | Handover Intelligence", page_icon="📡", layout="wide")
-st.title("📡 5G PED — Handover Intelligence")
-st.caption("Prediction · Explanation · Decision | Data-driven mobility analysis")
-st.info("Upload real measurement data to analyse handover candidates. This dashboard does not connect to a live carrier network. Recommendations are a configurable research policy, not a guarantee of successful handover.")
 
-ALIASES = {
-"serving_rsrp":["serving_rsrp","rsrp_serving","serving_cell_rsrp","ss_rsrp","rsrp"],
-"target_rsrp":["target_rsrp","neighbor_rsrp","neighbour_rsrp","target_cell_rsrp","candidate_rsrp","best_neighbor_rsrp"],
-"serving_rsrq":["serving_rsrq","rsrq_serving","serving_cell_rsrq","rsrq"],
-"target_rsrq":["target_rsrq","neighbor_rsrq","neighbour_rsrq","target_cell_rsrq","candidate_rsrq"],
-"serving_sinr":["serving_sinr","sinr_serving","serving_cell_sinr","sinr","cinr"],
-"target_sinr":["target_sinr","neighbor_sinr","neighbour_sinr","target_cell_sinr","candidate_sinr"],
-"timestamp":["timestamp","time","datetime","date_time","time_stamp"],
-"ue":["ue_id","imsi","subscriber_id","user_id","vehicle_id","ue"],
-"serving_cell":["serving_cell","serving_cell_id","serving_cgi","source_cell","source_cell_id","current_cell","cell_id","cid","cgi"],
-"target_cell":["target_cell","target_cell_id","neighbor_cell","neighbour_cell","candidate_cell","target_cgi"],
-"speed":["speed","speed_kmh","velocity","ue_speed","velocity_kmh","speed_ms"],
-"throughput":["throughput","throughput_mbps","dl_throughput","data_rate","rlc_throughput"],
-"latency":["latency","latency_ms","delay","rlc_delay","packet_delay"],
-"load":["cell_load","cell_load_percent","load","prb_utilization","prb_utilisation"],
-"label":["handover_trigger","handover_label","handover","ho_trigger","is_handover","upcoming_handover","migration","handover_event"]
-}
-def norm(s): return "".join(x.lower() for x in str(s).strip() if x.isalnum() or x=="_")
-def auto_col(cols, key):
-    bynorm={norm(c):c for c in cols}
-    for a in ALIASES[key]:
-        if norm(a) in bynorm: return bynorm[norm(a)]
-    return "(not available)"
-def read_file(f):
-    b=f.getvalue()
-    if f.name.lower().endswith(".zip"):
-        z=zipfile.ZipFile(io.BytesIO(b))
-        candidates=[n for n in z.namelist() if n.lower().endswith((".csv",".txt",".tsv")) and not n.endswith("/")]
-        if not candidates: raise ValueError("ZIP has no CSV/TXT/TSV files.")
-        choice=st.sidebar.selectbox("File inside ZIP", candidates)
-        b=z.read(choice); name=choice
-    else: name=f.name
-    try: d=pd.read_csv(io.BytesIO(b), sep=None, engine="python", low_memory=False)
-    except Exception: d=pd.read_csv(io.BytesIO(b), sep=r"\s+", engine="python", low_memory=False)
-    if d.shape[1]==1 and "\t" in str(d.iloc[0,0]): d=pd.read_csv(io.BytesIO(b), sep="\t", low_memory=False)
-    d.columns=[str(c).strip() for c in d.columns]
-    return d,name
-def num(s): return pd.to_numeric(s, errors="coerce")
-def value(row, col):
+st.set_page_config(
+    page_title="5G PED | Handover Intelligence",
+    page_icon="📡",
+    layout="wide",
+)
+
+st.title("📡 5G PED — Handover Intelligence")
+st.caption(
+    "Prediction · Explanation · Decision | "
+    "Data-driven radio handover analysis"
+)
+
+st.info(
+    "This dashboard uses a transparent rule-based handover policy. "
+    "It is a decision-support prototype, not a live cellular-network "
+    "controller or a trained machine-learning model."
+)
+
+
+# ---------------------------------------------------------
+# DATA LOADING
+# ---------------------------------------------------------
+
+def read_table(file_bytes, filename):
+    """Read CSV, TSV, whitespace-separated, or Excel data."""
+    name = filename.lower()
+
+    if name.endswith((".xlsx", ".xls")):
+        return pd.read_excel(io.BytesIO(file_bytes))
+
+    if name.endswith((".tsv", ".tab")):
+        return pd.read_csv(io.BytesIO(file_bytes), sep="\t")
+
+    # Fixed: engine='python' does not support low_memory.
     try:
-        v=float(row[col])
-        return v if np.isfinite(v) else None
-    except Exception: return None
+        df = pd.read_csv(
+            io.BytesIO(file_bytes),
+            sep=None,
+            engine="python",
+        )
+    except Exception:
+        df = pd.read_csv(
+            io.BytesIO(file_bytes),
+            sep=r"\s+",
+            engine="python",
+        )
+
+    # Handle a tab-separated file that was read as one column.
+    if df.shape[1] == 1:
+        first_value = str(df.iloc[0, 0]) if len(df) else ""
+        if "\t" in first_value:
+            df = pd.read_csv(io.BytesIO(file_bytes), sep="\t")
+
+    return df
+
+
+def load_uploaded_file(uploaded_file):
+    """Load a data file or the first supported table in a ZIP."""
+    file_bytes = uploaded_file.getvalue()
+    filename = uploaded_file.name.lower()
+
+    if filename.endswith(".zip"):
+        with zipfile.ZipFile(io.BytesIO(file_bytes)) as archive:
+            candidates = [
+                item for item in archive.namelist()
+                if not item.startswith("__MACOSX/")
+                and not item.split("/")[-1].startswith(".")
+                and item.lower().endswith(
+                    (".csv", ".tsv", ".tab", ".txt", ".xlsx", ".xls")
+                )
+            ]
+
+            if not candidates:
+                raise ValueError(
+                    "The ZIP contains no CSV, TSV, TXT, or Excel data file."
+                )
+
+            # Prefer CSV/TSV/TXT before Excel.
+            candidates.sort(
+                key=lambda item: (
+                    not item.lower().endswith((".csv", ".tsv", ".tab", ".txt")),
+                    item.count("/"),
+                )
+            )
+
+            selected_name = candidates[0]
+            with archive.open(selected_name) as file:
+                return read_table(file.read(), selected_name), selected_name
+
+    return read_table(file_bytes, uploaded_file.name), uploaded_file.name
+
+
+# ---------------------------------------------------------
+# COLUMN MAPPING
+# ---------------------------------------------------------
+
+def find_column(columns, keywords):
+    """Guess a column from its name; user can change the selection."""
+    for column in columns:
+        name = str(column).lower().replace("_", " ").replace("-", " ")
+        if any(keyword in name for keyword in keywords):
+            return column
+    return columns[0] if columns else None
+
+
+def numeric_series(df, column):
+    if column is None or column not in df.columns:
+        return pd.Series(np.nan, index=df.index)
+    return pd.to_numeric(
+        df[column].astype(str).str.replace(",", "", regex=False),
+        errors="coerce",
+    )
+
+
+def safe_text(value):
+    if pd.isna(value):
+        return "Unknown"
+    return str(value)
+
+
+# ---------------------------------------------------------
+# DECISION ENGINE
+# ---------------------------------------------------------
+
+def evaluate_handover(
+    serving_rsrp,
+    target_rsrp,
+    serving_sinr,
+    target_sinr,
+    min_target_rsrp,
+    min_target_sinr,
+    hysteresis,
+    weak_serving_rsrp,
+):
+    """
+    Transparent screening policy using radio measurements.
+
+    RSRP is typically expressed in dBm.
+    SINR is typically expressed in dB.
+    Confirm the units and meanings in your dataset documentation.
+    """
+    required = [serving_rsrp, target_rsrp]
+
+    if any(pd.isna(value) for value in required):
+        return {
+            "decision": "INSUFFICIENT DATA",
+            "reason": "Serving or target RSRP is missing.",
+            "advantage": np.nan,
+            "target_suitable": False,
+        }
+
+    advantage = target_rsrp - serving_rsrp
+
+    target_rsrp_ok = target_rsrp >= min_target_rsrp
+    target_sinr_known = not pd.isna(target_sinr)
+    target_sinr_ok = (
+        target_sinr >= min_target_sinr if target_sinr_known else None
+    )
+
+    if not target_rsrp_ok:
+        return {
+            "decision": "STAY — TARGET NOT SUITABLE",
+            "reason": (
+                f"Target RSRP is {target_rsrp:.1f} dBm, below the "
+                f"configured minimum of {min_target_rsrp:.1f} dBm."
+            ),
+            "advantage": advantage,
+            "target_suitable": False,
+        }
+
+    if target_sinr_known and not target_sinr_ok:
+        return {
+            "decision": "STAY — TARGET NOT SUITABLE",
+            "reason": (
+                f"Target SINR is {target_sinr:.1f} dB, below the "
+                f"configured minimum of {min_target_sinr:.1f} dB."
+            ),
+            "advantage": advantage,
+            "target_suitable": False,
+        }
+
+    if advantage >= hysteresis:
+        reason = (
+            f"Target RSRP is {advantage:.1f} dB stronger than serving "
+            f"RSRP, meeting the {hysteresis:.1f} dB hysteresis threshold."
+        )
+        if not target_sinr_known:
+            reason += " Target SINR is unavailable, so this check was skipped."
+
+        return {
+            "decision": "HANDOVER CANDIDATE",
+            "reason": reason,
+            "advantage": advantage,
+            "target_suitable": True,
+        }
+
+    if serving_rsrp <= weak_serving_rsrp and advantage >= 0:
+        reason = (
+            f"Serving RSRP is weak ({serving_rsrp:.1f} dBm), and the "
+            f"target is at least as strong ({target_rsrp:.1f} dBm)."
+        )
+        if not target_sinr_known:
+            reason += " Target SINR is unavailable, so this check was skipped."
+
+        return {
+            "decision": "HANDOVER CANDIDATE",
+            "reason": reason,
+            "advantage": advantage,
+            "target_suitable": True,
+        }
+
+    return {
+        "decision": "STAY CONNECTED",
+        "reason": (
+            f"Target passes the configured suitability checks, but its "
+            f"RSRP advantage ({advantage:.1f} dB) does not meet the "
+            f"{hysteresis:.1f} dB hysteresis threshold."
+        ),
+        "advantage": advantage,
+        "target_suitable": True,
+    }
+
+
+# ---------------------------------------------------------
+# SIDEBAR
+# ---------------------------------------------------------
 
 with st.sidebar:
-    st.header("Load data")
-    upload=st.file_uploader("Upload CSV, TXT, TSV or ZIP", type=["csv","txt","tsv","zip"])
+    st.header("⚙️ Decision policy")
+
+    min_target_rsrp = st.slider(
+        "Minimum target RSRP (dBm)",
+        min_value=-140,
+        max_value=-60,
+        value=-110,
+        step=1,
+    )
+
+    min_target_sinr = st.slider(
+        "Minimum target SINR (dB)",
+        min_value=-10,
+        max_value=30,
+        value=0,
+        step=1,
+    )
+
+    hysteresis = st.slider(
+        "Handover hysteresis (dB)",
+        min_value=0.0,
+        max_value=10.0,
+        value=3.0,
+        step=0.5,
+    )
+
+    weak_serving_rsrp = st.slider(
+        "Weak serving threshold (dBm)",
+        min_value=-140,
+        max_value=-70,
+        value=-115,
+        step=1,
+    )
+
     st.divider()
-    st.header("Decision policy")
-    hysteresis=st.slider("Target RSRP advantage (dB)",0.0,10.0,3.0,0.5)
-    weak=st.slider("Serving weak-signal threshold (dBm)",-120,-70,-105)
-    target_min=st.slider("Minimum target RSRP (dBm)",-120,-70,-110)
-    sinr_min=st.slider("Minimum target SINR (dB)",-10,25,0)
-    use_sinr=st.checkbox("Apply SINR suitability gate when mapped",True)
-if not upload:
-    st.subheader("Start with a real dataset")
-    st.markdown("""
-**Recommended: [Mobility Dataset from a 7.2 O-RAN deployment](https://data.mendeley.com/datasets/khxgr6m8wz)**  
-A real four-base-station deployment with RSRP, RSRQ, SINR and around 2,300 handover events.
+    st.caption(
+        "These thresholds are configurable prototype settings, "
+        "not universal 3GPP requirements."
+    )
 
-**Alternative: [Drive-Test-Based LTE Handover Dataset](https://data.mendeley.com/datasets/n2pvmtyn2j/2)**  
-Real-world LTE drive-test data; note that it is LTE, not 5G NR.
 
-Download a CSV/TXT data file, upload it here, and confirm the column mapping. Review each dataset's data dictionary and license before publishing results.
-""")
-    st.markdown("### What the decision requires")
-    st.write("- Serving and target/neighbor RSRP for the same observation.")
-    st.write("- RSRQ/SINR, timestamps and UE identifiers where available.")
-    st.write("- Historical handover labels for evaluation; an event label alone does not prove a handover was successful or optimal.")
+# ---------------------------------------------------------
+# FILE UPLOAD
+# ---------------------------------------------------------
+
+uploaded_file = st.file_uploader(
+    "Upload your radio measurement dataset",
+    type=["csv", "tsv", "tab", "txt", "xlsx", "xls", "zip"],
+    help="Upload a table or a ZIP containing one or more data tables.",
+)
+
+if uploaded_file is None:
+    st.subheader("Get started")
+    st.markdown(
+        """
+        1. Upload a dataset containing serving-cell and target-cell radio measurements.
+        2. Map the dataset's columns to the required fields.
+        3. Inspect a row to see the handover decision and its explanation.
+        4. Explore the measurements and download the scored results.
+        """
+    )
+
+    st.warning(
+        "The app needs serving-cell RSRP and target-cell RSRP for a "
+        "meaningful decision. If your dataset contains only one cell's "
+        "measurements, it cannot directly compare serving and target cells."
+    )
     st.stop()
-try: df, source=read_file(upload)
-except Exception as e: st.error(f"Could not read file: {e}"); st.stop()
-if df.empty or len(df.columns)<2: st.error("File is empty or has fewer than two columns."); st.stop()
-st.success(f"Loaded **{source}** · {len(df):,} rows · {len(df.columns)} columns")
-with st.expander("Inspect raw data"): st.dataframe(df.head(30),use_container_width=True)
-cols=list(df.columns); options=["(not available)"]+cols
-st.subheader("Confirm dataset column mapping")
-st.caption("Automatic matching is only a suggestion. Confirm each selection against the dataset documentation.")
-mapping={}
-layout=st.columns(3)
-fields=[
-("serving_rsrp","Serving-cell RSRP (dBm)"),("target_rsrp","Target/neighbor RSRP (dBm)"),
-("serving_rsrq","Serving-cell RSRQ (dB)"),("target_rsrq","Target/neighbor RSRQ (dB)"),
-("serving_sinr","Serving-cell SINR (dB)"),("target_sinr","Target/neighbor SINR (dB)"),
-("serving_cell","Serving-cell ID"),("target_cell","Target/neighbor cell ID"),
-("timestamp","Timestamp"),("ue","UE/device ID"),("speed","UE speed"),
-("throughput","Throughput"),("latency","Latency"),("load","Cell load"),("label","Historical handover label/event")]
-for i,(key,label) in enumerate(fields):
-    default=auto_col(cols,key); ix=options.index(default) if default in options else 0
-    mapping[key]=layout[i%3].selectbox(label,options,index=ix,key="map_"+key)
-def series(key):
-    c=mapping[key]
-    return num(df[c]) if c!="(not available)" else pd.Series(np.nan,index=df.index)
-work=df.copy()
-for k in ["serving_rsrp","target_rsrp","serving_rsrq","target_rsrq","serving_sinr","target_sinr","speed","throughput","latency","load"]:
-    work["_"+k]=series(k)
-work["_advantage"]=work["_target_rsrp"]-work["_serving_rsrp"]
-work["_decision"]="INSUFFICIENT DATA"
-valid=work["_serving_rsrp"].notna() & work["_target_rsrp"].notna()
-for ix,row in work.loc[valid].iterrows():
-    adv=row["_advantage"]; s=row["_serving_rsrp"]; t=row["_target_rsrp"]
-    target_ok=t>=target_min
-    why_sinr=use_sinr and mapping["target_sinr"]!="(not available)" and pd.notna(row["_target_sinr"]) and row["_target_sinr"]<sinr_min
-    if not target_ok or why_sinr: decision="STAY — TARGET NOT SUITABLE"
-    elif adv>=hysteresis or (s<=weak and adv>=0): decision="HANDOVER CANDIDATE"
-    else: decision="STAY CONNECTED"
-    work.at[ix,"_decision"]=decision
 
-st.subheader("Explore observations")
-if mapping["ue"]!="(not available)":
-    ues=sorted(df[mapping["ue"]].dropna().astype(str).unique().tolist())[:5000]
-    selected=st.selectbox("UE/device",["All UEs"]+ues)
-    if selected!="All UEs": work=work[df.loc[work.index,mapping["ue"]].astype(str)==selected].copy()
-if mapping["timestamp"]!="(not available)":
-    work["_time"]=pd.to_datetime(work[mapping["timestamp"]],errors="coerce",utc=True)
-    tv=work["_time"].dropna()
-    if len(tv)>1 and tv.min()<tv.max():
-        bounds=st.slider("Time window (UTC)",tv.min().to_pydatetime(),tv.max().to_pydatetime(),(tv.min().to_pydatetime(),tv.max().to_pydatetime()),format="YYYY-MM-DD HH:mm")
-        work=work[(work["_time"]>=pd.Timestamp(bounds[0]))&(work["_time"]<=pd.Timestamp(bounds[1]))].copy()
-if work.empty: st.warning("No observations match these filters."); st.stop()
-idx=st.slider("Observation row",0,len(work)-1,min(len(work)//2,len(work)-1))
-row=work.iloc[idx]
-decision=row["_decision"]; s=value(row,"_serving_rsrp"); t=value(row,"_target_rsrp"); adv=value(row,"_advantage")
-st.divider(); st.subheader("PED decision report")
-if decision=="HANDOVER CANDIDATE":
-    st.success("## HANDOVER CANDIDATE")
-    st.write("The candidate passes the configured suitability gate and its RSRP advantage meets the selected policy. This is a candidate for handover evaluation, not a command to execute a live handover.")
-elif decision=="STAY — TARGET NOT SUITABLE":
-    st.error("## STAY CONNECTED — TARGET NOT SUITABLE")
-    st.write("The candidate fails a configured target quality gate. A stronger-looking signal alone is not sufficient.")
-elif decision=="STAY CONNECTED":
-    st.warning("## STAY CONNECTED")
-    st.write("The target does not meet the configured RSRP advantage/weak-serving condition, so this policy does not recommend handover for this observation.")
+
+# ---------------------------------------------------------
+# READ DATASET
+# ---------------------------------------------------------
+
+try:
+    raw_df, loaded_filename = load_uploaded_file(uploaded_file)
+except Exception as exc:
+    st.error(f"Could not read file: {exc}")
+    st.stop()
+
+if raw_df.empty:
+    st.error("The uploaded file contains no data rows.")
+    st.stop()
+
+raw_df.columns = [
+    str(column).strip() for column in raw_df.columns
+]
+raw_df = raw_df.loc[:, ~raw_df.columns.duplicated()]
+
+st.success(
+    f"Loaded **{loaded_filename}** — "
+    f"{raw_df.shape[0]:,} rows × {raw_df.shape[1]:,} columns."
+)
+
+with st.expander("Preview original data"):
+    st.dataframe(raw_df.head(20), use_container_width=True)
+
+columns = list(raw_df.columns)
+
+if len(columns) < 1:
+    st.error("No columns were detected in this file.")
+    st.stop()
+
+
+# ---------------------------------------------------------
+# MAP DATASET COLUMNS
+# ---------------------------------------------------------
+
+st.header("1. Map your dataset columns")
+st.caption(
+    "Automatic suggestions are only guesses. Verify every mapping "
+    "against your dataset's documentation."
+)
+
+with st.expander("Column mapping", expanded=True):
+    col1, col2 = st.columns(2)
+
+    serving_rsrp_col = col1.selectbox(
+        "Serving-cell RSRP",
+        columns,
+        index=columns.index(
+            find_column(columns, ["serving rsrp", "serving_rsrp", "source rsrp"])
+        ),
+        key="serving_rsrp",
+    )
+
+    target_rsrp_col = col2.selectbox(
+        "Target-cell RSRP",
+        columns,
+        index=columns.index(
+            find_column(columns, ["target rsrp", "neighbor rsrp", "neighbour rsrp"])
+        ),
+        key="target_rsrp",
+    )
+
+    col3, col4 = st.columns(2)
+
+    serving_sinr_options = ["Not available"] + columns
+    target_sinr_options = ["Not available"] + columns
+
+    serving_sinr_guess = find_column(
+        columns, ["serving sinr", "serving_sinr"]
+    )
+    target_sinr_guess = find_column(
+        columns, ["target sinr", "neighbor sinr", "neighbour sinr"]
+    )
+
+    serving_sinr_col = col3.selectbox(
+        "Serving-cell SINR (optional)",
+        serving_sinr_options,
+        index=(
+            serving_sinr_options.index(serving_sinr_guess) + 1
+            if serving_sinr_guess in columns
+            and any(k in str(serving_sinr_guess).lower()
+                    for k in ["serving", "source"])
+            else 0
+        ),
+        key="serving_sinr",
+    )
+
+    target_sinr_col = col4.selectbox(
+        "Target-cell SINR (optional)",
+        target_sinr_options,
+        index=(
+            target_sinr_options.index(target_sinr_guess) + 1
+            if target_sinr_guess in columns
+            and any(k in str(target_sinr_guess).lower()
+                    for k in ["target", "neighbor", "neighbour"])
+            else 0
+        ),
+        key="target_sinr",
+    )
+
+    col5, col6 = st.columns(2)
+
+    ue_options = ["Not available"] + columns
+    timestamp_options = ["Not available"] + columns
+
+    ue_guess = find_column(columns, ["ue id", "user id", "device id", "subscriber"])
+    time_guess = find_column(columns, ["timestamp", "datetime", "date time", "time"])
+
+    ue_col = col5.selectbox(
+        "UE / device identifier (optional)",
+        ue_options,
+        index=ue_options.index(ue_guess) + 1 if ue_guess in columns else 0,
+        key="ue_id",
+    )
+
+    timestamp_col = col6.selectbox(
+        "Timestamp (optional)",
+        timestamp_options,
+        index=(
+            timestamp_options.index(time_guess) + 1
+            if time_guess in columns
+            else 0
+        ),
+        key="timestamp",
+    )
+
+    col7, col8 = st.columns(2)
+
+    speed_options = ["Not available"] + columns
+    throughput_options = ["Not available"] + columns
+
+    speed_guess = find_column(columns, ["speed", "velocity", "kmh"])
+    throughput_guess = find_column(columns, ["throughput", "data rate"])
+
+    speed_col = col7.selectbox(
+        "Speed (optional)",
+        speed_options,
+        index=speed_options.index(speed_guess) + 1 if speed_guess in columns else 0,
+        key="speed",
+    )
+
+    throughput_col = col8.selectbox(
+        "Throughput (optional)",
+        throughput_options,
+        index=(
+            throughput_options.index(throughput_guess) + 1
+            if throughput_guess in columns
+            else 0
+        ),
+        key="throughput",
+    )
+
+
+# ---------------------------------------------------------
+# PREPARE DATA
+# ---------------------------------------------------------
+
+df = raw_df.copy()
+
+df["_serving_rsrp"] = numeric_series(df, serving_rsrp_col)
+df["_target_rsrp"] = numeric_series(df, target_rsrp_col)
+
+if serving_sinr_col != "Not available":
+    df["_serving_sinr"] = numeric_series(df, serving_sinr_col)
 else:
-    st.warning("## INSUFFICIENT DATA")
-    st.write("Both serving-cell and target-cell RSRP are required. The app will not guess when measurements are missing.")
-a,b,c,d=st.columns(4)
-a.metric("Serving RSRP",f"{s:.1f} dBm" if s is not None else "Missing")
-b.metric("Target RSRP",f"{t:.1f} dBm" if t is not None else "Missing")
-c.metric("Target advantage",f"{adv:+.1f} dB" if adv is not None else "Unavailable")
-d.metric("Filtered observations",f"{len(work):,}")
-st.markdown("### Why?")
-reasons=[]
-if s is None or t is None: reasons.append("Missing serving or target RSRP; no decision can be made.")
+    df["_serving_sinr"] = np.nan
+
+if target_sinr_col != "Not available":
+    df["_target_sinr"] = numeric_series(df, target_sinr_col)
 else:
-    reasons.append(f"Target RSRP advantage is {adv:+.1f} dB; configured threshold is {hysteresis:.1f} dB.")
-    reasons.append(f"Serving RSRP is {s:.1f} dBm; weak-signal threshold is {weak} dBm.")
-    reasons.append(f"Target RSRP is {t:.1f} dBm; minimum target threshold is {target_min} dBm.")
-    if use_sinr and mapping["target_sinr"]!="(not available)":
-        ts=value(row,"_target_sinr")
-        if ts is not None: reasons.append(f"Target SINR is {ts:.1f} dB; configured minimum is {sinr_min} dB.")
-    if mapping["serving_rsrq"]!="(not available)" and mapping["target_rsrq"]!="(not available)":
-        sr=value(row,"_serving_rsrq"); tr=value(row,"_target_rsrq")
-        if sr is not None and tr is not None: reasons.append(f"Quality context: serving RSRQ {sr:.1f} dB; target RSRQ {tr:.1f} dB.")
-for r in reasons: st.markdown("- "+r)
-with st.expander("Policy assumptions and limitations"):
-    st.markdown(f"""
-- Target RSRP advantage threshold: **{hysteresis:.1f} dB**
-- Serving weak-signal threshold: **{weak} dBm**
-- Minimum target RSRP: **{target_min} dBm**
-- SINR suitability gate: **{'enabled when available' if use_sinr else 'disabled'}**
-- These thresholds are configurable demo settings, not universal 3GPP defaults.
-- This version uses transparent rules, not a trained ML model. It does not infer success probability from historical event labels.
-- A robust temporal controller requires ordered UE/candidate measurements, time-to-trigger, filtering, target-cell load/capacity and labeled outcomes such as successful/failed handovers and ping-pong events.
-""")
-st.divider(); st.subheader("Interactive graphs")
-plot=work.copy(); plot["_observation"]=np.arange(len(plot))
-x="_time" if "_time" in plot.columns and plot["_time"].notna().any() else "_observation"
-if valid.any():
-    melted=plot[["_serving_rsrp","_target_rsrp",x]].melt(id_vars=x,var_name="Measurement",value_name="RSRP (dBm)")
-    melted["Measurement"]=melted["Measurement"].map({"_serving_rsrp":"Serving cell","_target_rsrp":"Target/neighbor"})
-    fig=px.line(melted,x=x,y="RSRP (dBm)",color="Measurement",title="Serving vs target radio signal")
-    fig.update_layout(hovermode="x unified",xaxis_title="Time (UTC)" if x=="_time" else "Observation order")
-    st.plotly_chart(fig,use_container_width=True)
-    fig=px.histogram(plot,x="_advantage",color="_decision",nbins=40,title="Target-cell RSRP advantage by decision")
-    fig.update_layout(xaxis_title="Target RSRP − serving RSRP (dB)")
-    st.plotly_chart(fig,use_container_width=True)
-else: st.warning("Map both serving and target RSRP to enable decisions and signal comparison.")
-metrics=[(k,label) for k,label in [("_serving_rsrq","Serving RSRQ"),("_target_rsrq","Target RSRQ"),("_serving_sinr","Serving SINR"),("_target_sinr","Target SINR"),("_speed","UE speed"),("_throughput","Throughput"),("_latency","Latency"),("_load","Cell load")] if work[k].notna().any()]
-if metrics:
-    key,label=st.selectbox("Explore another metric",metrics,format_func=lambda x:x[1])
-    st.plotly_chart(px.line(plot,x=x,y=key,title=f"{label} over observations"),use_container_width=True)
-st.subheader("Decision summary")
-counts=work["_decision"].value_counts().rename_axis("Decision").reset_index(name="Observations")
-l,r=st.columns(2)
-l.dataframe(counts,use_container_width=True,hide_index=True)
-r.plotly_chart(px.pie(counts,names="Decision",values="Observations",title="Decision distribution"),use_container_width=True)
-if mapping["label"]!="(not available)":
-    st.subheader("Dataset-provided historical label")
-    st.caption("This is the source dataset's label, not necessarily a successful handover or proof that handover was optimal.")
-    st.dataframe(work[[mapping["label"],"_decision"]].head(100),use_container_width=True,hide_index=True)
-st.download_button("Download filtered analysis CSV",work.to_csv(index=False).encode("utf-8"),"ped_handover_analysis.csv","text/csv")
-st.caption("Research prototype only. Do not use as a live network controller.")
+    df["_target_sinr"] = np.nan
+
+if ue_col != "Not available":
+    df["_ue_id"] = df[ue_col].astype(str)
+else:
+    df["_ue_id"] = "All devices"
+
+if timestamp_col != "Not available":
+    df["_timestamp"] = pd.to_datetime(
+        df[timestamp_col], errors="coerce"
+    )
+else:
+    df["_timestamp"] = pd.NaT
+
+if speed_col != "Not available":
+    df["_speed"] = numeric_series(df, speed_col)
+else:
+    df["_speed"] = np.nan
+
+if throughput_col != "Not available":
+    df["_throughput"] = numeric_series(df, throughput_col)
+else:
+    df["_throughput"] = np.nan
+
+df["_source_row"] = np.arange(len(df))
+
+valid_radio_rows = df[
+    df["_serving_rsrp"].notna() & df["_target_rsrp"].notna()
+].copy()
+
+if valid_radio_rows.empty:
+    st.error(
+        "No rows contain numeric values in both selected RSRP columns. "
+        "Check your column mappings and confirm that the values are in dBm."
+    )
+    st.stop()
+
+
+# ---------------------------------------------------------
+# FILTERS
+# ---------------------------------------------------------
+
+st.header("2. Filter observations")
+
+filtered = valid_radio_rows.copy()
+
+filter_col1, filter_col2 = st.columns(2)
+
+with filter_col1:
+    ue_values = sorted(filtered["_ue_id"].dropna().astype(str).unique())
+    selected_ues = st.multiselect(
+        "Filter by UE / device",
+        options=ue_values,
+        default=ue_values[: min(10, len(ue_values))],
+    )
+
+if ue_col != "Not available":
+    filtered = filtered[filtered["_ue_id"].astype(str).isin(selected_ues)]
+
+if timestamp_col != "Not available":
+    valid_times = filtered["_timestamp"].dropna()
+
+    if not valid_times.empty:
+        with filter_col2:
+            date_range = st.date_input(
+                "Filter by date",
+                value=(valid_times.min().date(), valid_times.max().date()),
+            )
+
+        if isinstance(date_range, tuple) and len(date_range) == 2:
+            start_date, end_date = date_range
+            filtered = filtered[
+                filtered["_timestamp"].isna()
+                | (
+                    (filtered["_timestamp"].dt.date >= start_date)
+                    & (filtered["_timestamp"].dt.date <= end_date)
+                )
+            ]
+
+if filtered.empty:
+    st.warning("No observations match the selected filters.")
+    st.stop()
+
+
+# ---------------------------------------------------------
+# SCORE ALL FILTERED ROWS
+# ---------------------------------------------------------
+
+results = []
+
+for _, row in filtered.iterrows():
+    outcome = evaluate_handover(
+        serving_rsrp=row["_serving_rsrp"],
+        target_rsrp=row["_target_rsrp"],
+        serving_sinr=row["_serving_sinr"],
+        target_sinr=row["_target_sinr"],
+        min_target_rsrp=min_target_rsrp,
+        min_target_sinr=min_target_sinr,
+        hysteresis=hysteresis,
+        weak_serving_rsrp=weak_serving_rsrp,
+    )
+
+    results.append({
+        "source_row": int(row["_source_row"]),
+        "ue_id": row["_ue_id"],
+        "timestamp": row["_timestamp"],
+        "serving_rsrp_dbm": row["_serving_rsrp"],
+        "target_rsrp_dbm": row["_target_rsrp"],
+        "serving_sinr_db": row["_serving_sinr"],
+        "target_sinr_db": row["_target_sinr"],
+        "target_advantage_db": outcome["advantage"],
+        "decision": outcome["decision"],
+        "reason": outcome["reason"],
+        "target_suitable": outcome["target_suitable"],
+        "speed": row["_speed"],
+        "throughput": row["_throughput"],
+    })
+
+scored = pd.DataFrame(results)
+
+
+# ---------------------------------------------------------
+# DASHBOARD METRICS
+# ---------------------------------------------------------
+
+st.header("3. Handover overview")
+
+candidate_count = int(
+    (scored["decision"] == "HANDOVER CANDIDATE").sum()
+)
+stay_count = int(
+    (scored["decision"] == "STAY CONNECTED").sum()
+)
+unsuitable_count = int(
+    (scored["decision"] == "STAY — TARGET NOT SUITABLE").sum()
+)
+insufficient_count = int(
+    (scored["decision"] == "INSUFFICIENT DATA").sum()
+)
+
+metric1, metric2, metric3, metric4 = st.columns(4)
+
+metric1.metric("Observations analysed", f"{len(scored):,}")
+metric2.metric("Handover candidates", f"{candidate_count:,}")
+metric3.metric("Stay connected", f"{stay_count:,}")
+metric4.metric("Target unsuitable", f"{unsuitable_count:,}")
+
+decision_counts = (
+    scored["decision"].value_counts().rename_axis("Decision").reset_index(name="Count")
+)
+
+chart_col1, chart_col2 = st.columns(2)
+
+with chart_col1:
+    st.subheader("Decision distribution")
+    fig = px.pie(
+        decision_counts,
+        names="Decision",
+        values="Count",
+        hole=0.45,
+        title="Policy decisions",
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+with chart_col2:
+    st.subheader("Serving vs target signal")
+    scatter = px.scatter(
+        scored,
+        x="serving_rsrp_dbm",
+        y="target_rsrp_dbm",
+        color="decision",
+        hover_data=["source_row", "ue_id", "target_advantage_db"],
+        labels={
+            "serving_rsrp_dbm": "Serving RSRP (dBm)",
+            "target_rsrp_dbm": "Target RSRP (dBm)",
+            "source_row": "Source row",
+            "ue_id": "UE / device",
+        },
+        title="Signal comparison by decision",
+    )
+    st.plotly_chart(scatter, use_container_width=True)
+
+st.subheader("Target signal advantage")
+adv_fig = px.histogram(
+    scored.dropna(subset=["target_advantage_db"]),
+    x="target_advantage_db",
+    color="decision",
+    nbins=35,
+    labels={
+        "target_advantage_db": "Target RSRP − serving RSRP (dB)"
+    },
+)
+adv_fig.add_vline(
+    x=hysteresis,
+    line_dash="dash",
+    annotation_text=f"Hysteresis = {hysteresis:.1f} dB",
+)
+st.plotly_chart(adv_fig, use_container_width=True)
+
+
+# ---------------------------------------------------------
+# OBSERVATION INSPECTOR
+# ---------------------------------------------------------
+
+st.header("4. Inspect a handover decision")
+
+st.caption(
+    "Select an observation to see the decision and the reason "
+    "the configured policy produced it."
+)
+
+selected_source_row = st.selectbox(
+    "Select source row",
+    options=scored["source_row"].tolist(),
+    format_func=lambda value: (
+        f"Row {value + 1} · "
+        f"{scored.loc[scored['source_row'] == value, 'decision'].iloc[0]}"
+    ),
+)
+
+selected = scored[scored["source_row"] == selected_source_row].iloc[0]
+
+st.subheader(selected["decision"])
+
+st.write(f"**Explanation:** {selected['reason']}")
+
+detail1, detail2, detail3 = st.columns(3)
+
+detail1.metric(
+    "Serving RSRP",
+    f"{selected['serving_rsrp_dbm']:.1f} dBm",
+)
+detail2.metric(
+    "Target RSRP",
+    f"{selected['target_rsrp_dbm']:.1f} dBm",
+)
+if pd.notna(selected["target_advantage_db"]):
+    detail3.metric(
+        "Target advantage",
+        f"{selected['target_advantage_db']:.1f} dB",
+    )
+else:
+    detail3.metric("Target advantage", "N/A")
+
+extra1, extra2, extra3 = st.columns(3)
+
+extra1.metric(
+    "Serving SINR",
+    (
+        f"{selected['serving_sinr_db']:.1f} dB"
+        if pd.notna(selected["serving_sinr_db"])
+        else "Not available"
+    ),
+)
+
+extra2.metric(
+    "Target SINR",
+    (
+        f"{selected['target_sinr_db']:.1f} dB"
+        if pd.notna(selected["target_sinr_db"])
+        else "Not available"
+    ),
+)
+
+extra3.metric("UE / device", safe_text(selected["ue_id"]))
+
+st.markdown("**Decision logic used**")
+
+st.markdown(
+    f"""
+    - Target RSRP minimum: **{min_target_rsrp} dBm**
+    - Target SINR minimum: **{min_target_sinr} dB**, when target SINR is available
+    - Hysteresis: **{hysteresis:.1f} dB**
+    - Weak serving-cell threshold: **{weak_serving_rsrp} dBm**
+    """
+)
+
+with st.expander("Show selected source row"):
+    original = raw_df.iloc[int(selected_source_row)]
+    st.dataframe(
+        original.to_frame(name="Value"),
+        use_container_width=True,
+    )
+
+
+# ---------------------------------------------------------
+# SIGNAL TREND
+# ---------------------------------------------------------
+
+st.header("5. Signal trend")
+
+if timestamp_col != "Not available":
+    trend = scored.dropna(subset=["timestamp"]).sort_values("timestamp")
+
+    if not trend.empty:
+        fig = go.Figure()
+
+        fig.add_trace(go.Scatter(
+            x=trend["timestamp"],
+            y=trend["serving_rsrp_dbm"],
+            mode="lines+markers",
+            name="Serving RSRP",
+        ))
+
+        fig.add_trace(go.Scatter(
+            x=trend["timestamp"],
+            y=trend["target_rsrp_dbm"],
+            mode="lines+markers",
+            name="Target RSRP",
+        ))
+
+        fig.update_layout(
+            xaxis_title="Timestamp",
+            yaxis_title="RSRP (dBm)",
+            hovermode="x unified",
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info(
+            "No valid timestamps were found. Check the timestamp column format."
+        )
+else:
+    st.info(
+        "Map a timestamp column to enable time-series analysis."
+    )
+
+
+# ---------------------------------------------------------
+# FULL RESULTS AND EXPORT
+# ---------------------------------------------------------
+
+st.header("6. Scored observations")
+
+display_columns = [
+    "source_row",
+    "ue_id",
+    "timestamp",
+    "serving_rsrp_dbm",
+    "target_rsrp_dbm",
+    "serving_sinr_db",
+    "target_sinr_db",
+    "target_advantage_db",
+    "decision",
+    "reason",
+]
+
+st.dataframe(
+    scored[display_columns],
+    use_container_width=True,
+    hide_index=True,
+)
+
+csv_bytes = scored.to_csv(index=False).encode("utf-8")
+
+st.download_button(
+    label="⬇️ Download scored decisions (CSV)",
+    data=csv_bytes,
+    file_name="ped_handover_decisions.csv",
+    mime="text/csv",
+)
+
+st.caption(
+    f"Analysis generated at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}. "
+    "Results depend on the selected columns, measurement units, "
+    "data quality, and configured thresholds."
+)
